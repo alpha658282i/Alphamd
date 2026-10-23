@@ -12,12 +12,11 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
-const AUTH_DIR = './sessions';
-const LOG_FILE = './data/chat_logs.json';
+const AUTH_DIR = path.join(__dirname, 'sessions');
+const LOG_FILE = path.join(__dirname, 'data', 'chat_logs.json');
 
 fs.ensureDirSync(AUTH_DIR);
-fs.ensureDirSync('./data');
-fs.ensureDirSync('./commands');
+fs.ensureDirSync(path.join(__dirname, 'data'));
 if (!fs.existsSync(LOG_FILE)) fs.writeJsonSync(LOG_FILE, []);
 
 app.use(express.json());
@@ -26,11 +25,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 const sessions = {};
 const commands = new Map();
 
+// ─── COMMANDS LOADER (FIXED PATHS) ───
 const loadCommands = () => {
-    const commandFiles = fs.readdirSync('./commands').filter(file => file.endsWith('.js'));
+    const commandsDir = path.join(__dirname, 'commands');
+    if (!fs.existsSync(commandsDir)) return console.log("Commands folder not found!");
+    
+    const commandFiles = fs.readdirSync(commandsDir).filter(file => file.endsWith('.js'));
     for (const file of commandFiles) {
         try {
-            const command = require(`./commands/${file}`);
+            const command = require(path.join(commandsDir, file));
             if (command.name && command.execute) {
                 commands.set(command.name, command);
                 if (command.aliases) {
@@ -43,6 +46,7 @@ const loadCommands = () => {
 };
 loadCommands();
 
+// ─── API ROUTES ───
 app.post('/api/pair', async (req, res) => {
     const { number } = req.body;
     if (!number) return res.status(400).json({ error: 'Number required' });
@@ -75,6 +79,7 @@ app.post('/api/admin/data', (req, res) => {
     res.json({ logs, activeUsers });
 });
 
+// ─── BOT SESSION CLASS ───
 class BotSession {
     constructor(userId, authPath, phone) {
         this.userId = userId; this.authPath = authPath; this.phone = phone;
@@ -93,9 +98,15 @@ class BotSession {
     async initialize(pairingNumber) {
         const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
+        
         this.sock = makeWASocket({
-            version, auth: state, logger: P({ level: 'fatal' }), browser: Browsers.ubuntu('Chrome'), printQRInTerminal: false
+            version, 
+            auth: state, 
+            logger: P({ level: 'fatal' }), 
+            browser: Browsers.ubuntu('Chrome'), 
+            printQRInTerminal: false
         });
+        
         this.sock.ev.on('creds.update', saveCreds);
         
         let code = null;
@@ -106,10 +117,16 @@ class BotSession {
         }
         
         this.sock.ev.on('connection.update', (update) => {
-            if (update.connection === 'open') { this.isConnected = true; io.to(this.userId).emit('connected'); }
+            if (update.connection === 'open') { 
+                this.isConnected = true; 
+                console.log(`[${this.phone}] Connected ✅`);
+                io.to(this.userId).emit('connected'); 
+            }
             if (update.connection === 'close') {
                 this.isConnected = false;
-                if (update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) setTimeout(() => this.initialize(), 5000);
+                if (update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+                    setTimeout(() => this.initialize(), 5000);
+                }
             }
         });
         
@@ -122,12 +139,14 @@ class BotSession {
             const sender = isGroup ? msg.key.participant : from;
             const body = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || '';
             
+            // Chat Log Save karna
             const senderName = msg.key.fromMe ? 'Bot' : sender.split('@')[0];
             const receiverName = msg.key.fromMe ? from.split('@')[0] : 'Bot';
             if(body) this.saveLog(senderName, receiverName, body, msg.key.fromMe ? 'sent' : 'received');
 
             if (msg.key.fromMe || !body.startsWith('.')) return;
 
+            // Command Processing
             const args = body.slice(1).trim().split(/ +/);
             const cmdName = args.shift().toLowerCase();
             
@@ -138,7 +157,7 @@ class BotSession {
                     await command.execute(this.sock, msg, from, sender, args);
                     await this.sock.sendMessage(from, { react: { text: '✅', key: msg.key } });
                 } catch (err) {
-                    console.log(err);
+                    console.error(`Command Error (${cmdName}):`, err);
                     await this.sock.sendMessage(from, { react: { text: '❌', key: msg.key } });
                 }
             }
@@ -147,5 +166,12 @@ class BotSession {
     }
 }
 
+// ─── SERVER START ───
 io.on('connection', (socket) => { socket.on('join', (id) => socket.join(id)); });
-server.listen(PORT, () => console.log(`Bot running on http://localhost:${PORT}`));
+
+server.listen(PORT, () => {
+    console.log(`\n================================`);
+    console.log(`  ALPHA MD BOT IS RUNNING`);
+    console.log(`  http://localhost:${PORT}`);
+    console.log(`================================\n`);
+});
